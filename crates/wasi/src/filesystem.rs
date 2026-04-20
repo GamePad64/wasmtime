@@ -65,6 +65,77 @@ impl HasData for WasiFilesystem {
 pub struct WasiFilesystemCtx {
     pub(crate) allow_blocking_current_thread: bool,
     pub(crate) preopens: Vec<(Dir, String)>,
+    pub(crate) policy_hook: Option<Arc<dyn FilesystemPolicyHook>>,
+}
+
+impl WasiFilesystemCtx {
+    /// Install a policy hook that is consulted before every path-taking
+    /// filesystem operation (`open-at`, `stat-at`, `unlink-file-at`, etc.).
+    ///
+    /// When a hook is installed, the default p2 and p3 `wasi:filesystem`
+    /// host impls call [`FilesystemPolicyHook::check`] with the parent
+    /// descriptor resource, the op kind, and the guest-supplied relative
+    /// path before dispatching to the underlying operation. If the hook
+    /// returns `Err`, the op fails with the returned error code and no
+    /// filesystem access occurs.
+    ///
+    /// This enables downstream embeddings (sandbox hosts, capability
+    /// systems) to gate per-path access without needing to shadow every
+    /// host trait impl individually.
+    pub fn set_policy_hook(&mut self, hook: Arc<dyn FilesystemPolicyHook>) {
+        self.policy_hook = Some(hook);
+    }
+
+    /// Remove a previously installed policy hook. After this call, all
+    /// path-taking ops proceed without a policy check.
+    pub fn clear_policy_hook(&mut self) {
+        self.policy_hook = None;
+    }
+}
+
+/// Identifies which path-taking `wasi:filesystem` operation a
+/// [`FilesystemPolicyHook::check`] invocation is gating.
+///
+/// Two-path operations (`rename-at`, `link-at`) invoke the hook twice —
+/// once for the source `(fd, path)` pair and once for the destination —
+/// both of which must succeed for the op to proceed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum FilesystemOp {
+    OpenAt,
+    StatAt,
+    SetTimesAt,
+    LinkAt,
+    SymlinkAt,
+    UnlinkFileAt,
+    ReadlinkAt,
+    RemoveDirectoryAt,
+    RenameAt,
+    CreateDirectoryAt,
+    MetadataHashAt,
+}
+
+/// A policy hook consulted before every path-taking filesystem operation.
+///
+/// Install on a [`WasiFilesystemCtx`] via
+/// [`WasiFilesystemCtx::set_policy_hook`].
+///
+/// Implementors gate access to paths under already-opened descriptors
+/// (preopens and their children). The `parent` resource identifies the
+/// descriptor the op is relative to; implementors typically map the
+/// resource `.rep()` to a host path they recorded when the descriptor
+/// was opened. `path` is the guest-supplied, uncanonicalised relative
+/// path component.
+///
+/// Returning `Err(ErrorCode::NotPermitted)` (or any other `ErrorCode`)
+/// aborts the op; the guest sees the same error via the WIT binding.
+pub trait FilesystemPolicyHook: Send + Sync {
+    fn check(
+        &self,
+        parent: &Resource<Descriptor>,
+        op: FilesystemOp,
+        path: &str,
+    ) -> Result<(), ErrorCode>;
 }
 
 pub struct WasiFilesystemCtxView<'a> {
@@ -188,7 +259,7 @@ bitflags::bitflags! {
     windows,
     expect(dead_code, reason = "on Windows, some of these are not used")
 )]
-pub(crate) enum ErrorCode {
+pub enum ErrorCode {
     /// Permission denied, similar to `EACCES` in POSIX.
     Access,
     /// Connection already in progress, similar to `EALREADY` in POSIX.

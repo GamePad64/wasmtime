@@ -1,5 +1,7 @@
 use crate::filesystem::sys;
-use crate::filesystem::{Descriptor, Dir, File, WasiFilesystem, WasiFilesystemCtxView};
+use crate::filesystem::{
+    Descriptor, Dir, File, FilesystemOp, WasiFilesystem, WasiFilesystemCtxView,
+};
 use crate::p3::bindings::clocks::system_clock;
 use crate::p3::bindings::filesystem::types::{
     self, Advice, DescriptorFlags, DescriptorStat, DescriptorType, DirectoryEntry, ErrorCode,
@@ -58,6 +60,15 @@ trait AccessorExt {
         a: &Resource<Descriptor>,
         b: &Resource<Descriptor>,
     ) -> FilesystemResult<(Dir, Dir)>;
+    /// Consult the installed `FilesystemPolicyHook`, if any, for a
+    /// `(parent_fd, op, path)` triple. Returns `Err` if the hook denies
+    /// the op.
+    fn check_policy(
+        &self,
+        parent: &Resource<Descriptor>,
+        op: FilesystemOp,
+        path: &str,
+    ) -> FilesystemResult<()>;
 }
 
 impl<T> AccessorExt for Accessor<T, WasiFilesystem> {
@@ -93,6 +104,19 @@ impl<T> AccessorExt for Accessor<T, WasiFilesystem> {
             let b = get_dir(table, b)?;
             Ok((a.clone(), b.clone()))
         })
+    }
+
+    fn check_policy(
+        &self,
+        parent: &Resource<Descriptor>,
+        op: FilesystemOp,
+        path: &str,
+    ) -> FilesystemResult<()> {
+        let hook = self.with(|mut store| store.get().ctx.policy_hook.clone());
+        if let Some(hook) = hook {
+            hook.check(parent, op, path)?;
+        }
+        Ok(())
     }
 }
 
@@ -694,6 +718,7 @@ impl types::HostDescriptorWithStore for WasiFilesystem {
         fd: Resource<Descriptor>,
         path: String,
     ) -> FilesystemResult<()> {
+        store.check_policy(&fd, FilesystemOp::CreateDirectoryAt, &path)?;
         let dir = store.get_dir(&fd)?;
         dir.create_directory_at(path).await?;
         Ok(())
@@ -714,6 +739,7 @@ impl types::HostDescriptorWithStore for WasiFilesystem {
         path_flags: PathFlags,
         path: String,
     ) -> FilesystemResult<DescriptorStat> {
+        store.check_policy(&fd, FilesystemOp::StatAt, &path)?;
         let dir = store.get_dir(&fd)?;
         let stat = dir.stat_at(path_flags.into(), path).await?;
         Ok(stat.into())
@@ -727,6 +753,7 @@ impl types::HostDescriptorWithStore for WasiFilesystem {
         data_access_timestamp: NewTimestamp,
         data_modification_timestamp: NewTimestamp,
     ) -> FilesystemResult<()> {
+        store.check_policy(&fd, FilesystemOp::SetTimesAt, &path)?;
         let dir = store.get_dir(&fd)?;
         let atim = systemtimespec_from(data_access_timestamp)?;
         let mtim = systemtimespec_from(data_modification_timestamp)?;
@@ -743,6 +770,8 @@ impl types::HostDescriptorWithStore for WasiFilesystem {
         new_fd: Resource<Descriptor>,
         new_path: String,
     ) -> FilesystemResult<()> {
+        store.check_policy(&fd, FilesystemOp::LinkAt, &old_path)?;
+        store.check_policy(&new_fd, FilesystemOp::LinkAt, &new_path)?;
         let (old_dir, new_dir) = store.get_dir_pair(&fd, &new_fd)?;
         old_dir
             .link_at(old_path_flags.into(), old_path, &new_dir, new_path)
@@ -758,6 +787,7 @@ impl types::HostDescriptorWithStore for WasiFilesystem {
         open_flags: OpenFlags,
         flags: DescriptorFlags,
     ) -> FilesystemResult<Resource<Descriptor>> {
+        store.check_policy(&fd, FilesystemOp::OpenAt, &path)?;
         let (allow_blocking_current_thread, dir) = store.with(|mut store| {
             let store = store.get();
             let dir = get_dir(&store.table, &fd)?;
@@ -781,6 +811,7 @@ impl types::HostDescriptorWithStore for WasiFilesystem {
         fd: Resource<Descriptor>,
         path: String,
     ) -> FilesystemResult<String> {
+        store.check_policy(&fd, FilesystemOp::ReadlinkAt, &path)?;
         let dir = store.get_dir(&fd)?;
         let path = dir.readlink_at(path).await?;
         Ok(path)
@@ -791,6 +822,7 @@ impl types::HostDescriptorWithStore for WasiFilesystem {
         fd: Resource<Descriptor>,
         path: String,
     ) -> FilesystemResult<()> {
+        store.check_policy(&fd, FilesystemOp::RemoveDirectoryAt, &path)?;
         let dir = store.get_dir(&fd)?;
         dir.remove_directory_at(path).await?;
         Ok(())
@@ -803,6 +835,8 @@ impl types::HostDescriptorWithStore for WasiFilesystem {
         new_fd: Resource<Descriptor>,
         new_path: String,
     ) -> FilesystemResult<()> {
+        store.check_policy(&fd, FilesystemOp::RenameAt, &old_path)?;
+        store.check_policy(&new_fd, FilesystemOp::RenameAt, &new_path)?;
         let (old_dir, new_dir) = store.get_dir_pair(&fd, &new_fd)?;
         old_dir.rename_at(old_path, &new_dir, new_path).await?;
         Ok(())
@@ -814,6 +848,7 @@ impl types::HostDescriptorWithStore for WasiFilesystem {
         old_path: String,
         new_path: String,
     ) -> FilesystemResult<()> {
+        store.check_policy(&fd, FilesystemOp::SymlinkAt, &new_path)?;
         let dir = store.get_dir(&fd)?;
         dir.symlink_at(old_path, new_path).await?;
         Ok(())
@@ -824,6 +859,7 @@ impl types::HostDescriptorWithStore for WasiFilesystem {
         fd: Resource<Descriptor>,
         path: String,
     ) -> FilesystemResult<()> {
+        store.check_policy(&fd, FilesystemOp::UnlinkFileAt, &path)?;
         let dir = store.get_dir(&fd)?;
         dir.unlink_file_at(path).await?;
         Ok(())
@@ -858,6 +894,7 @@ impl types::HostDescriptorWithStore for WasiFilesystem {
         path_flags: PathFlags,
         path: String,
     ) -> FilesystemResult<MetadataHashValue> {
+        store.check_policy(&fd, FilesystemOp::MetadataHashAt, &path)?;
         let dir = store.get_dir(&fd)?;
         let meta = dir.metadata_hash_at(path_flags.into(), path).await?;
         Ok(meta.into())

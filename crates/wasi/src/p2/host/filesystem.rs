@@ -1,5 +1,5 @@
 use crate::filesystem::sys;
-use crate::filesystem::{Descriptor, WasiFilesystemCtxView};
+use crate::filesystem::{Descriptor, FilesystemOp, WasiFilesystemCtxView};
 use crate::p2::bindings::clocks::wall_clock;
 use crate::p2::bindings::filesystem::preopens;
 use crate::p2::bindings::filesystem::types::{
@@ -10,6 +10,20 @@ use crate::p2::{FsError, FsResult};
 use crate::{DirPerms, FilePerms};
 use wasmtime::component::Resource;
 use wasmtime_wasi_io::streams::{DynInputStream, DynOutputStream};
+
+impl WasiFilesystemCtxView<'_> {
+    fn check_policy(
+        &self,
+        fd: &Resource<Descriptor>,
+        op: FilesystemOp,
+        path: &str,
+    ) -> FsResult<()> {
+        if let Some(hook) = self.ctx.policy_hook.as_ref() {
+            hook.check(fd, op, path)?;
+        }
+        Ok(())
+    }
+}
 
 mod sync;
 
@@ -227,6 +241,7 @@ impl HostDescriptor for WasiFilesystemCtxView<'_> {
         fd: Resource<types::Descriptor>,
         path: String,
     ) -> FsResult<()> {
+        self.check_policy(&fd, FilesystemOp::CreateDirectoryAt, &path)?;
         let d = self.table.get(&fd)?.dir()?;
         d.create_directory_at(path).await?;
         Ok(())
@@ -244,6 +259,7 @@ impl HostDescriptor for WasiFilesystemCtxView<'_> {
         path_flags: types::PathFlags,
         path: String,
     ) -> FsResult<types::DescriptorStat> {
+        self.check_policy(&fd, FilesystemOp::StatAt, &path)?;
         let d = self.table.get(&fd)?.dir()?;
         let stat = d.stat_at(path_flags.into(), path).await?;
         Ok(stat.try_into()?)
@@ -257,6 +273,7 @@ impl HostDescriptor for WasiFilesystemCtxView<'_> {
         atim: types::NewTimestamp,
         mtim: types::NewTimestamp,
     ) -> FsResult<()> {
+        self.check_policy(&fd, FilesystemOp::SetTimesAt, &path)?;
         let d = self.table.get(&fd)?.dir()?;
         let atim = systemtimespec_from(atim)?;
         let mtim = systemtimespec_from(mtim)?;
@@ -273,6 +290,8 @@ impl HostDescriptor for WasiFilesystemCtxView<'_> {
         new_descriptor: Resource<types::Descriptor>,
         new_path: String,
     ) -> FsResult<()> {
+        self.check_policy(&fd, FilesystemOp::LinkAt, &old_path)?;
+        self.check_policy(&new_descriptor, FilesystemOp::LinkAt, &new_path)?;
         let old_dir = self.table.get(&fd)?.dir()?;
         let new_dir = self.table.get(&new_descriptor)?.dir()?;
         old_dir
@@ -289,6 +308,7 @@ impl HostDescriptor for WasiFilesystemCtxView<'_> {
         oflags: types::OpenFlags,
         flags: types::DescriptorFlags,
     ) -> FsResult<Resource<types::Descriptor>> {
+        self.check_policy(&fd, FilesystemOp::OpenAt, &path)?;
         let d = self.table.get(&fd)?.dir()?;
         let fd = d
             .open_at(
@@ -319,6 +339,7 @@ impl HostDescriptor for WasiFilesystemCtxView<'_> {
         fd: Resource<types::Descriptor>,
         path: String,
     ) -> FsResult<String> {
+        self.check_policy(&fd, FilesystemOp::ReadlinkAt, &path)?;
         let d = self.table.get(&fd)?.dir()?;
         let path = d.readlink_at(path).await?;
         Ok(path)
@@ -329,6 +350,7 @@ impl HostDescriptor for WasiFilesystemCtxView<'_> {
         fd: Resource<types::Descriptor>,
         path: String,
     ) -> FsResult<()> {
+        self.check_policy(&fd, FilesystemOp::RemoveDirectoryAt, &path)?;
         let d = self.table.get(&fd)?.dir()?;
         d.remove_directory_at(path).await?;
         Ok(())
@@ -341,6 +363,8 @@ impl HostDescriptor for WasiFilesystemCtxView<'_> {
         new_fd: Resource<types::Descriptor>,
         new_path: String,
     ) -> FsResult<()> {
+        self.check_policy(&fd, FilesystemOp::RenameAt, &old_path)?;
+        self.check_policy(&new_fd, FilesystemOp::RenameAt, &new_path)?;
         let old_dir = self.table.get(&fd)?.dir()?;
         let new_dir = self.table.get(&new_fd)?.dir()?;
         old_dir.rename_at(old_path, new_dir, new_path).await?;
@@ -353,6 +377,7 @@ impl HostDescriptor for WasiFilesystemCtxView<'_> {
         src_path: String,
         dest_path: String,
     ) -> FsResult<()> {
+        self.check_policy(&fd, FilesystemOp::SymlinkAt, &dest_path)?;
         let d = self.table.get(&fd)?.dir()?;
         d.symlink_at(src_path, dest_path).await?;
         Ok(())
@@ -363,6 +388,7 @@ impl HostDescriptor for WasiFilesystemCtxView<'_> {
         fd: Resource<types::Descriptor>,
         path: String,
     ) -> FsResult<()> {
+        self.check_policy(&fd, FilesystemOp::UnlinkFileAt, &path)?;
         let d = self.table.get(&fd)?.dir()?;
         d.unlink_file_at(path).await?;
         Ok(())
@@ -455,6 +481,7 @@ impl HostDescriptor for WasiFilesystemCtxView<'_> {
         path_flags: types::PathFlags,
         path: String,
     ) -> FsResult<types::MetadataHashValue> {
+        self.check_policy(&fd, FilesystemOp::MetadataHashAt, &path)?;
         let d = self.table.get(&fd)?.dir()?;
         let meta = d.metadata_hash_at(path_flags.into(), path).await?;
         Ok(meta.into())
